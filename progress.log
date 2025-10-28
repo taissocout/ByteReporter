@@ -2,3 +2,4 @@
 [2026-03-12] #0002  Refactored module structure  // feat: define estrutura de dados do relatorio
 [2026-03-12] #0003  Improved variable naming  // 100% Funcional
 [2026-03-12] #0004  Added edge-case handling  // feat: adiciona parser de entrada via argparse
+[2026-03-12] #0005  Added input validation  // feat: implementa geracao de relatorio em markdown
