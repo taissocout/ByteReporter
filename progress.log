@@ -7,3 +7,4 @@
 [2026-03-12] #0007  Added edge-case handling  // feat: adiciona suporte a exportacao HTML
 [2026-03-12] #0008  Added early-return pattern  // feat: implementa template de relatorio com jinja2
 [2026-03-12] #0009  Improved variable naming  // feat: adiciona secao de sumario executivo
+[2026-03-12] #0010  Reorganised folder structure  // feat: adiciona secao de findings detalhados
