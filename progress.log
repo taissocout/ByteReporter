@@ -5,3 +5,4 @@
 [2026-03-12] #0005  Added input validation  // feat: implementa geracao de relatorio em markdown
 [2026-03-12] #0006  Improved variable naming  // Atualizado
 [2026-03-12] #0007  Added edge-case handling  // feat: adiciona suporte a exportacao HTML
+[2026-03-12] #0008  Added early-return pattern  // feat: implementa template de relatorio com jinja2
