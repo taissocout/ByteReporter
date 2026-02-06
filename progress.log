@@ -9,3 +9,4 @@
 [2026-03-12] #0009  Improved variable naming  // feat: adiciona secao de sumario executivo
 [2026-03-12] #0010  Reorganised folder structure  // feat: adiciona secao de findings detalhados
 [2026-03-12] #0011  Added input validation  // feat: implementa severity scoring low med high crit
+[2026-03-12] #0012  Optimised query performance  // fix: corrige encoding em relatorios com UTF-8
