@@ -52,7 +52,7 @@ def banner():
       /____/                     /_/
 """
     print(c(art, CYAN))
-    print(c("  ByteReporter v2 — HEX/BIN → Ethernet/IP/TCP/HTTP → relatório leigo\n", DIM))
+    print(c("  ByteReporter v2 — HEX/BIN → Ethernet/IP/TCP/HTTP\n", DIM))
 
 
 # =========================
