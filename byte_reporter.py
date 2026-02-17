@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-# byte_reporter.py — Analisador de bytes (hex/bin) com banner e relatório
+# ByteReporter v2 — Decodifica HEX/BIN e explica Ethernet/IP/TCP/HTTP de forma leiga
+#
+# - Se o arquivo for "bytes.txt" com "d4 ab 82 ...", ele detecta e converte HEX -> bytes.
+# - Se for binário real, ele analisa como bytes direto.
+# - Tenta parsear: Ethernet -> IPv4 -> TCP -> payload -> HTTP.
+#
 # Uso:
-#   python3 byte_reporter.py --file sample.bin --report report.md --dump
-#   python3 byte_reporter.py --hex "4d5a9000..." --report report.md
-#   python3 byte_reporter.py --hex-in dump_hex.txt --report report.md --strings
+#   python3 byte_reporter.py           (interativo)
+#   python3 byte_reporter.py --file bytes.txt --report report.md
+#
+# Autor: Taisso Coutinho
 
 import argparse
 import hashlib
@@ -12,7 +18,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Optional, Tuple, Dict, List
 
 
 # =========================
@@ -22,18 +28,19 @@ from typing import Dict, List, Tuple, Optional
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-
 RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
-MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 
-def colorize(s: str, c: str) -> str:
-    if not sys.stdout.isatty():
+def is_tty() -> bool:
+    return sys.stdout.isatty()
+
+def c(s: str, color: str) -> str:
+    if not is_tty():
         return s
-    return f"{c}{s}{RESET}"
+    return f"{color}{s}{RESET}"
 
 def banner():
     art = r"""
@@ -44,42 +51,60 @@ def banner():
 /_____/\__, /\__/\___//_/ |_|\___/ .___/\____/_/   \__/\___/_/
       /____/                     /_/
 """
-    print(colorize(art, CYAN))
-    print(colorize("  ByteReporter — análise de hex/bin → bytes → relatório\n", DIM))
+    print(c(art, CYAN))
+    print(c("  ByteReporter v2 — HEX/BIN → Ethernet/IP/TCP/HTTP → relatório leigo\n", DIM))
 
 
 # =========================
-# Hex parsing / bytes
+# Hex helpers
 # =========================
 
 HEX_CLEAN_RE = re.compile(r'(?i)(0x|\\x)')
-HEX_ONLY_RE = re.compile(r'^[0-9a-fA-F]*$')
+HEX_PAIR_RE = re.compile(r'(?i)\b[0-9a-f]{2}\b')
 
-def normalize_hex(s: str) -> str:
+def normalize_hex_text(s: str) -> str:
+    # remove 0x e \x, mantém apenas hex e separadores
     s = HEX_CLEAN_RE.sub("", s)
-    s = re.sub(r'[^0-9a-fA-F]', "", s)
+    # troca qualquer coisa não-hex por espaço (preserva pares)
+    s = re.sub(r'[^0-9a-fA-F]', ' ', s)
+    # normaliza espaços
+    s = re.sub(r'\s+', ' ', s).strip()
     return s
 
-def hex_to_bytes(hex_str: str) -> bytes:
-    hex_str = normalize_hex(hex_str)
-    if not hex_str:
-        raise ValueError("Entrada vazia após normalização (não sobrou hex).")
-    if len(hex_str) % 2 != 0:
-        raise ValueError(f"Hex inválido: tamanho ímpar ({len(hex_str)}).")
-    if not HEX_ONLY_RE.match(hex_str):
-        raise ValueError("Hex inválido: contém caracteres fora de 0-9a-f.")
-    return bytes.fromhex(hex_str)
+def hex_text_to_bytes(s: str) -> bytes:
+    # extrai pares hex e converte
+    pairs = HEX_PAIR_RE.findall(s)
+    if not pairs:
+        raise ValueError("Não encontrei pares HEX (ex: '4d', 'ff', '0a') no texto.")
+    return bytes(int(p, 16) for p in pairs)
+
+def looks_like_hex_text(raw: bytes) -> bool:
+    """
+    Heurística: se o arquivo é "texto" e contém muitos pares hex, provavelmente é dump hex.
+    """
+    try:
+        txt = raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return False
+    pairs = HEX_PAIR_RE.findall(txt)
+    # se tem muitos pares e pouco lixo, consideramos hex-text
+    if len(pairs) >= 16:  # mínimo para caber headers
+        # se a maioria do conteúdo são hex/espacos
+        cleaned = normalize_hex_text(txt)
+        # se após normalizar ainda há pares suficientes
+        return len(HEX_PAIR_RE.findall(cleaned)) >= 16
+    return False
 
 
 # =========================
-# Utilitários de análise
+# Byte analysis utilities
 # =========================
-
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 def entropy(data: bytes) -> float:
     if not data:
@@ -89,27 +114,16 @@ def entropy(data: bytes) -> float:
         counts[b] += 1
     ent = 0.0
     ln = len(data)
-    for c in counts:
-        if c:
-            p = c / ln
+    for c_ in counts:
+        if c_:
+            p = c_ / ln
             ent -= p * math.log2(p)
-    return ent  # 0..8 bits/byte
-
-def byte_frequency_top(data: bytes, topn: int = 10) -> List[Tuple[int, int, float]]:
-    if not data:
-        return []
-    counts = [0] * 256
-    for b in data:
-        counts[b] += 1
-    ln = len(data)
-    items = [(i, counts[i], counts[i]/ln) for i in range(256) if counts[i] > 0]
-    items.sort(key=lambda x: x[1], reverse=True)
-    return items[:topn]
+    return ent
 
 def printable_ascii(b: int) -> str:
     return chr(b) if 32 <= b <= 126 else "."
 
-def hexdump(data: bytes, width: int = 16, limit: Optional[int] = None) -> str:
+def hexdump(data: bytes, width: int = 16, limit: Optional[int] = 512) -> str:
     if limit is not None:
         data = data[:limit]
     lines = []
@@ -120,248 +134,543 @@ def hexdump(data: bytes, width: int = 16, limit: Optional[int] = None) -> str:
         lines.append(f"{off:08x}  {hex_part}  |{ascii_part}|")
     return "\n".join(lines)
 
-def decode_text_views(data: bytes) -> Dict[str, str]:
-    # “tradução” dos bytes para texto em diferentes visões
-    ascii_view = "".join(printable_ascii(b) for b in data)
-    utf8_view = data.decode("utf-8", errors="replace")
-    latin1_view = data.decode("latin-1", errors="replace")
+
+# =========================
+# Parsers: Ethernet / IPv4 / TCP / HTTP
+# =========================
+
+def mac_str(b: bytes) -> str:
+    return ":".join(f"{x:02x}" for x in b)
+
+def ip_str(b: bytes) -> str:
+    return ".".join(str(x) for x in b)
+
+def u16(b: bytes) -> int:
+    return (b[0] << 8) | b[1]
+
+def u32(b: bytes) -> int:
+    return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+
+TCP_FLAG_NAMES = [
+    (0x01, "FIN"),
+    (0x02, "SYN"),
+    (0x04, "RST"),
+    (0x08, "PSH"),
+    (0x10, "ACK"),
+    (0x20, "URG"),
+    (0x40, "ECE"),
+    (0x80, "CWR"),
+]
+
+def parse_ethernet(data: bytes) -> Optional[Dict]:
+    if len(data) < 14:
+        return None
+    dst = data[0:6]
+    src = data[6:12]
+    ethertype = u16(data[12:14])
     return {
-        "ASCII (printable/dot)": ascii_view,
-        "UTF-8 (replace)": utf8_view,
-        "Latin-1 (replace)": latin1_view,
+        "dst_mac": mac_str(dst),
+        "src_mac": mac_str(src),
+        "ethertype": ethertype,
+        "payload": data[14:],
     }
 
-def extract_strings(data: bytes, min_len: int = 4) -> List[str]:
-    # pega strings ASCII imprimíveis
-    out = []
-    cur = []
-    for b in data:
-        if 32 <= b <= 126:
-            cur.append(chr(b))
-        else:
-            if len(cur) >= min_len:
-                out.append("".join(cur))
-            cur = []
-    if len(cur) >= min_len:
-        out.append("".join(cur))
-    return out
+def parse_ipv4(data: bytes) -> Optional[Dict]:
+    if len(data) < 20:
+        return None
+    v_ihl = data[0]
+    version = (v_ihl >> 4) & 0x0F
+    ihl = (v_ihl & 0x0F) * 4
+    if version != 4 or ihl < 20 or len(data) < ihl:
+        return None
 
-def guess_filetype(data: bytes) -> List[str]:
-    # Heurísticas por magic bytes (bem úteis no relatório)
-    sigs = []
-    h = data[:32]
-    def starts(x: bytes) -> bool:
-        return h.startswith(x)
+    total_len = u16(data[2:4])
+    proto = data[9]
+    src = data[12:16]
+    dst = data[16:20]
 
-    if starts(b"MZ"):
-        sigs.append("PE/EXE (Windows) — magic 'MZ'")
-    if starts(b"\x7fELF"):
-        sigs.append("ELF (Linux) — magic 0x7F 'ELF'")
-    if starts(b"%PDF"):
-        sigs.append("PDF — magic '%PDF'")
-    if starts(b"\x89PNG\r\n\x1a\n"):
-        sigs.append("PNG — magic 89 50 4E 47")
-    if starts(b"\xff\xd8\xff"):
-        sigs.append("JPEG — magic FF D8 FF")
-    if starts(b"GIF87a") or starts(b"GIF89a"):
-        sigs.append("GIF — magic 'GIF87a/GIF89a'")
-    if starts(b"PK\x03\x04") or starts(b"PK\x05\x06") or starts(b"PK\x07\x08"):
-        sigs.append("ZIP / Office / APK (container PK)")
-    if starts(b"Rar!\x1a\x07\x00") or starts(b"Rar!\x1a\x07\x01\x00"):
-        sigs.append("RAR (archive)")
-    if starts(b"\x1f\x8b"):
-        sigs.append("GZIP (compressed)")
-    if starts(b"7z\xbc\xaf\x27\x1c"):
-        sigs.append("7z (archive)")
-    if starts(b"OggS"):
-        sigs.append("OGG (audio/container)")
-    if starts(b"ID3"):
-        sigs.append("MP3 (ID3 tag)")
-    if not sigs:
-        sigs.append("Desconhecido (sem assinatura óbvia nos primeiros bytes)")
-    return sigs
+    # garante limites
+    if total_len == 0 or total_len > len(data):
+        total_len = len(data)
+
+    return {
+        "version": version,
+        "ihl": ihl,
+        "total_len": total_len,
+        "protocol": proto,
+        "src_ip": ip_str(src),
+        "dst_ip": ip_str(dst),
+        "payload": data[ihl:total_len],
+    }
+
+def parse_tcp(data: bytes) -> Optional[Dict]:
+    if len(data) < 20:
+        return None
+    src_port = u16(data[0:2])
+    dst_port = u16(data[2:4])
+    seq = u32(data[4:8])
+    ack = u32(data[8:12])
+    doff = (data[12] >> 4) & 0x0F
+    hdr_len = doff * 4
+    if hdr_len < 20 or len(data) < hdr_len:
+        return None
+    flags = data[13]
+    win = u16(data[14:16])
+
+    flag_list = [name for bit, name in TCP_FLAG_NAMES if flags & bit]
+    return {
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "seq": seq,
+        "ack": ack,
+        "header_len": hdr_len,
+        "flags": flag_list,
+        "window": win,
+        "payload": data[hdr_len:],
+    }
+
+HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE ")
+
+def parse_http(payload: bytes) -> Optional[Dict]:
+    # Heurística simples para HTTP request
+    if not payload:
+        return None
+    if not any(payload.startswith(m) for m in HTTP_METHODS) and not payload.startswith(b"HTTP/"):
+        return None
+
+    # tenta decodificar como texto
+    text = payload.decode("utf-8", errors="replace")
+    # separa header/body
+    parts = text.split("\r\n\r\n", 1)
+    header_block = parts[0]
+    body = parts[1] if len(parts) > 1 else ""
+
+    lines = header_block.split("\r\n")
+    first = lines[0] if lines else ""
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            headers[k.strip()] = v.strip()
+
+    info = {"first_line": first, "headers": headers, "body": body}
+    # tenta extrair método/path/versão
+    if " " in first:
+        toks = first.split(" ")
+        if len(toks) >= 3:
+            info["method"] = toks[0]
+            info["path"] = toks[1]
+            info["version"] = toks[2]
+    return info
 
 
 # =========================
-# Relatório
+# “Explicação leiga”
 # =========================
 
-def build_report(
-    data: bytes,
-    source_label: str,
-    include_dump: bool,
-    dump_width: int,
-    dump_limit: Optional[int],
-    include_strings: bool,
-    strings_min: int,
-    strings_limit: int,
-    include_text_views: bool,
-    text_view_limit: int,
-) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    size = len(data)
-    ent = entropy(data)
-    sigs = guess_filetype(data)
-    top = byte_frequency_top(data, topn=10)
-
+def explain_for_layman(layers: Dict) -> str:
+    """
+    Texto curto e claro explicando o que foi encontrado.
+    """
     lines = []
-    lines.append(f"# ByteReporter — Relatório\n")
-    lines.append(f"- **Gerado em:** `{now}`")
-    lines.append(f"- **Fonte:** `{source_label}`")
-    lines.append(f"- **Tamanho:** `{size}` bytes")
-    lines.append(f"- **MD5:** `{md5(data)}`")
-    lines.append(f"- **SHA-256:** `{sha256(data)}`")
-    lines.append(f"- **Entropia (Shannon):** `{ent:.4f}` bits/byte  _(0 a 8; alto pode indicar compressão/criptografia)_")
-    lines.append("")
-    lines.append("## Assinatura / Tipo provável")
-    for s in sigs:
-        lines.append(f"- {s}")
-    lines.append("")
+    lines.append("## Explicação para leigos (o que isso significa)\n")
 
-    lines.append("## Frequência de bytes (Top 10)")
-    lines.append("| Byte (hex) | Contagem | Percentual |")
-    lines.append("|---|---:|---:|")
-    for b, c, p in top:
-        lines.append(f"| `0x{b:02X}` | {c} | {p*100:.2f}% |")
-    lines.append("")
-
-    if include_text_views:
-        lines.append("## “Tradução” dos bytes para texto (visões)")
-        views = decode_text_views(data[:text_view_limit])
-        lines.append(f"_Mostrando até `{text_view_limit}` bytes para evitar relatório gigante._\n")
-        for k, v in views.items():
-            lines.append(f"### {k}")
-            # evitar quebrar markdown com ``` dentro do texto
-            safe = v.replace("```", "` ` `")
-            lines.append("```")
-            lines.append(safe)
-            lines.append("```")
+    if "ethernet" in layers:
+        e = layers["ethernet"]
+        lines.append("- Isso parece ser um **quadro Ethernet** (tráfego de rede local).")
+        lines.append(f"  - **MAC origem**: `{e['src_mac']}` (quem enviou na rede local)")
+        lines.append(f"  - **MAC destino**: `{e['dst_mac']}` (para quem foi na rede local)")
         lines.append("")
 
-    if include_strings:
-        lines.append("## Strings ASCII encontradas")
-        strs = extract_strings(data, min_len=strings_min)
-        lines.append(f"- **Min len:** `{strings_min}`")
-        lines.append(f"- **Encontradas:** `{len(strs)}` (mostrando até `{strings_limit}`)\n")
-        for s in strs[:strings_limit]:
-            # encurta strings enormes
-            if len(s) > 200:
-                s = s[:200] + "…"
-            lines.append(f"- `{s}`")
+    if "ipv4" in layers:
+        ip = layers["ipv4"]
+        lines.append("- Dentro dele existe um **pacote IPv4** (endereço IP).")
+        lines.append(f"  - **IP origem**: `{ip['src_ip']}` (quem enviou)")
+        lines.append(f"  - **IP destino**: `{ip['dst_ip']}` (quem recebeu)")
         lines.append("")
 
-    if include_dump:
-        lines.append("## Hexdump")
-        if dump_limit is None:
-            lines.append("_Mostrando arquivo completo._\n")
-        else:
-            lines.append(f"_Mostrando apenas os primeiros `{dump_limit}` bytes._\n")
-        lines.append("```")
-        lines.append(hexdump(data, width=dump_width, limit=dump_limit))
-        lines.append("```")
+    if "tcp" in layers:
+        t = layers["tcp"]
+        lines.append("- Dentro do IP existe **TCP** (conexão parecida com 'chamada' confiável).")
+        lines.append(f"  - **Porta origem**: `{t['src_port']}` (porta de saída do cliente)")
+        lines.append(f"  - **Porta destino**: `{t['dst_port']}` (porta do serviço, ex: 80/443)")
+        lines.append(f"  - **Flags**: `{', '.join(t['flags']) if t['flags'] else 'nenhuma'}` (o que esse segmento está fazendo)")
         lines.append("")
 
-    # Pequeno “diagnóstico” para leitura rápida
-    lines.append("## Observações rápidas")
-    if ent >= 7.2:
-        lines.append("- Entropia alta: **pode** ser conteúdo comprimido/criptografado ou binário denso.")
-    elif ent <= 5.0:
-        lines.append("- Entropia baixa/moderada: tende a ter mais estrutura/repetição (texto, formatos simples, padding).")
+    if "http" in layers:
+        h = layers["http"]
+        lines.append("- O **conteúdo (payload)** parece ser **HTTP** (site / web).")
+        if "method" in h:
+            lines.append(f"  - **Requisição**: `{h.get('method','')} {h.get('path','')} {h.get('version','')}`")
+        host = h.get("headers", {}).get("Host")
+        ua = h.get("headers", {}).get("User-Agent")
+        if host:
+            lines.append(f"  - **Host (site)**: `{host}`")
+        if ua:
+            lines.append(f"  - **User-Agent**: `{ua}` (navegador/cliente)")
+        lines.append("")
     else:
-        lines.append("- Entropia intermediária: pode ser mistura (cabeçalhos + dados).")
+        # se tiver payload mas não é http
+        payload = layers.get("payload_bytes", b"")
+        if payload:
+            lines.append("- Existe um **payload** (conteúdo) que não parece HTTP pela heurística.")
+            lines.append("  - Pode ser outro protocolo, ou dados binários.")
+            lines.append("")
 
-    if size >= 50_000_000:
-        lines.append("- Arquivo grande: para relatório rápido, use `--dump-limit` e `--text-limit`.")
-    lines.append("")
     return "\n".join(lines)
 
 
 # =========================
-# Main CLI
+# Análise principal (detectar camadas)
 # =========================
 
-def main():
-    banner()
+def analyze_layers(data: bytes) -> Dict:
+    """
+    Tenta detectar camadas:
+    - Ethernet (ethertype 0x0800 -> IPv4)
+    - IPv4 (protocol 6 -> TCP)
+    - TCP -> payload -> HTTP
+    """
+    layers: Dict = {}
 
-    ap = argparse.ArgumentParser(
-        description="Converte HEX/BIN em bytes e gera relatório bonito (md/txt) + hexdump/strings/text views."
+    eth = parse_ethernet(data)
+    cursor = data
+
+    if eth and eth["ethertype"] == 0x0800:  # IPv4
+        layers["ethernet"] = {
+            "src_mac": eth["src_mac"],
+            "dst_mac": eth["dst_mac"],
+            "ethertype": eth["ethertype"],
+        }
+        cursor = eth["payload"]
+    else:
+        # talvez não tenha ethernet (pode ser só IP)
+        cursor = data
+
+    ip = parse_ipv4(cursor)
+    if ip:
+        layers["ipv4"] = {
+            "src_ip": ip["src_ip"],
+            "dst_ip": ip["dst_ip"],
+            "protocol": ip["protocol"],
+            "ihl": ip["ihl"],
+            "total_len": ip["total_len"],
+        }
+        cursor = ip["payload"]
+    else:
+        cursor = cursor
+
+    # TCP
+    if "ipv4" in layers and layers["ipv4"]["protocol"] == 6:
+        tcp = parse_tcp(cursor)
+        if tcp:
+            layers["tcp"] = {
+                "src_port": tcp["src_port"],
+                "dst_port": tcp["dst_port"],
+                "seq": tcp["seq"],
+                "ack": tcp["ack"],
+                "flags": tcp["flags"],
+                "window": tcp["window"],
+                "header_len": tcp["header_len"],
+            }
+            payload = tcp["payload"]
+            layers["payload_bytes"] = payload
+            http = parse_http(payload)
+            if http:
+                layers["http"] = http
+        else:
+            # não conseguiu parsear tcp
+            layers["payload_bytes"] = cursor
+    else:
+        # sem IP/TCP detectado: trata resto como payload
+        layers["payload_bytes"] = cursor
+
+    return layers
+
+
+# =========================
+# Relatório (leigo + técnico)
+# =========================
+
+def build_report(
+    source_label: str,
+    bytes_source_kind: str,
+    data: bytes,
+    layers: Dict,
+    dump_limit: int = 1024,
+) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ent = entropy(data)
+
+    payload = layers.get("payload_bytes", b"")
+    payload_text = payload.decode("utf-8", errors="replace") if payload else ""
+
+    lines: List[str] = []
+    lines.append("# ByteReporter — Relatório\n")
+    lines.append(f"- **Gerado em:** `{now}`")
+    lines.append(f"- **Fonte:** `{source_label}`")
+    lines.append(f"- **Como os bytes foram interpretados:** `{bytes_source_kind}`")
+    lines.append(f"- **Tamanho (bytes reais):** `{len(data)}` bytes")
+    lines.append(f"- **MD5:** `{md5(data)}`")
+    lines.append(f"- **SHA-256:** `{sha256(data)}`")
+    lines.append(f"- **Entropia (Shannon):** `{ent:.4f}` bits/byte")
+    lines.append("")
+
+    # Leigo
+    lines.append(explain_for_layman(layers))
+
+    # Técnico organizado
+    lines.append("## Decodificação organizada (técnico, mas claro)\n")
+
+    if "ethernet" in layers:
+        e = layers["ethernet"]
+        lines.append("### Camada 2 — Ethernet (rede local)")
+        lines.append(f"- **MAC origem:** `{e['src_mac']}`")
+        lines.append(f"- **MAC destino:** `{e['dst_mac']}`")
+        lines.append(f"- **EtherType:** `0x{e['ethertype']:04x}` (0800 = IPv4)")
+        lines.append("")
+
+    if "ipv4" in layers:
+        ip = layers["ipv4"]
+        proto = ip["protocol"]
+        proto_name = "TCP" if proto == 6 else ("UDP" if proto == 17 else str(proto))
+        lines.append("### Camada 3 — IPv4")
+        lines.append(f"- **IP origem:** `{ip['src_ip']}`")
+        lines.append(f"- **IP destino:** `{ip['dst_ip']}`")
+        lines.append(f"- **Protocolo:** `{proto}` ({proto_name})")
+        lines.append(f"- **IHL (tamanho do header):** `{ip['ihl']}` bytes")
+        lines.append(f"- **Total Length (tamanho do pacote IP):** `{ip['total_len']}` bytes")
+        lines.append("")
+
+    if "tcp" in layers:
+        t = layers["tcp"]
+        lines.append("### Camada 4 — TCP")
+        lines.append(f"- **Porta origem:** `{t['src_port']}`")
+        lines.append(f"- **Porta destino:** `{t['dst_port']}`")
+        lines.append(f"- **SEQ:** `{t['seq']}`")
+        lines.append(f"- **ACK:** `{t['ack']}`")
+        lines.append(f"- **Flags:** `{', '.join(t['flags']) if t['flags'] else 'nenhuma'}`")
+        lines.append(f"- **Window:** `{t['window']}`")
+        lines.append(f"- **Header Length:** `{t['header_len']}` bytes")
+        lines.append("")
+
+    # Payload
+    lines.append("### Payload (conteúdo transportado)")
+    lines.append(f"- **Tamanho do payload:** `{len(payload)}` bytes")
+    if "http" in layers:
+        h = layers["http"]
+        lines.append("- **Tipo detectado:** `HTTP`")
+        lines.append("")
+        lines.append("#### HTTP (interpretado)")
+        lines.append(f"- **Linha inicial:** `{h.get('first_line','')}`")
+        if "method" in h:
+            lines.append(f"- **Método:** `{h.get('method','')}`")
+            lines.append(f"- **Caminho:** `{h.get('path','')}`")
+            lines.append(f"- **Versão:** `{h.get('version','')}`")
+        lines.append("")
+        lines.append("#### Headers")
+        headers = h.get("headers", {})
+        if headers:
+            for k in sorted(headers.keys()):
+                lines.append(f"- **{k}:** `{headers[k]}`")
+        else:
+            lines.append("- (nenhum header parseado)")
+        lines.append("")
+        if h.get("body"):
+            lines.append("#### Body (primeiros 800 chars)")
+            body = h["body"]
+            if len(body) > 800:
+                body = body[:800] + "…"
+            lines.append("```")
+            lines.append(body.replace("```", "` ` `"))
+            lines.append("```")
+            lines.append("")
+    else:
+        lines.append("- **Tipo detectado:** `não identificado (pode ser binário/outro protocolo)`")
+        lines.append("")
+
+    # “Tradução” payload para texto (o que você queria: 0x41 -> 'A')
+    if payload:
+        lines.append("#### Payload em texto (UTF-8 com substituição)")
+        # limita para não explodir relatório
+        show = payload_text
+        if len(show) > 2000:
+            show = show[:2000] + "…"
+        lines.append("```")
+        lines.append(show.replace("```", "` ` `"))
+        lines.append("```")
+        lines.append("")
+
+    # hexdump dos bytes reais
+    lines.append("## Hexdump (bytes reais)")
+    lines.append(f"_Mostrando os primeiros `{dump_limit}` bytes._\n")
+    lines.append("```")
+    lines.append(hexdump(data, limit=dump_limit))
+    lines.append("```")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# =========================
+# Interativo
+# =========================
+
+def prompt_yes_no(q: str, default: bool = True) -> bool:
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    while True:
+        ans = input(c(q, BOLD) + suffix).strip().lower()
+        if not ans:
+            return default
+        if ans in ("y", "yes", "s", "sim"):
+            return True
+        if ans in ("n", "no", "nao", "não"):
+            return False
+        print(c("Resposta inválida. Digite y/n.", YELLOW))
+
+def interactive() -> None:
+    banner()
+    print(c("Modo interativo.\n", GREEN))
+    print(c("Dica: coloque o arquivo no MESMO diretório onde você roda o script.\n", DIM))
+
+    # arquivo
+    while True:
+        fname = input(c("Nome do arquivo para analisar (ex: bytes.txt): ", BOLD)).strip()
+        if not fname:
+            print(c("Nome vazio.", YELLOW))
+            continue
+        if os.path.sep in fname:
+            print(c("Use apenas o nome do arquivo (sem caminho).", YELLOW))
+            continue
+        if not os.path.isfile(fname):
+            print(c(f"Arquivo '{fname}' não encontrado aqui. Rode 'ls' e confira.", RED))
+            continue
+        break
+
+    with open(fname, "rb") as f:
+        raw = f.read()
+
+    # detectar se é hex-text
+    auto_hex = looks_like_hex_text(raw)
+    if auto_hex:
+        print(c("\n[+] Detectei que o arquivo parece ser HEX em texto (ex: 'd4 ab 82 ...').", GREEN))
+        use_hex = True
+    else:
+        print(c("\n[+] O arquivo parece binário (bytes reais).", GREEN))
+        use_hex = False
+
+    if prompt_yes_no("Quer forçar interpretação como HEX-text?", default=use_hex):
+        use_hex = True
+
+    if use_hex:
+        txt = raw.decode("utf-8", errors="ignore")
+        data = hex_text_to_bytes(txt)
+        kind = "hex-text -> bytes (conversão feita)"
+    else:
+        data = raw
+        kind = "binário -> bytes (direto)"
+
+    layers = analyze_layers(data)
+
+    report_name = input(c("Nome do relatório [report.md]: ", BOLD)).strip() or "report.md"
+    if not report_name.lower().endswith((".md", ".txt")):
+        report_name += ".md"
+
+    dump_limit = 1024
+    try:
+        dump_limit = int(input(c("Hexdump: quantos bytes mostrar? [1024]: ", BOLD)).strip() or "1024")
+        if dump_limit <= 0:
+            dump_limit = 1024
+    except Exception:
+        dump_limit = 1024
+
+    report = build_report(
+        source_label=f"file:{fname}",
+        bytes_source_kind=kind,
+        data=data,
+        layers=layers,
+        dump_limit=dump_limit,
     )
 
-    src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--file", help="Arquivo binário para analisar (ex: sample.bin).")
-    src.add_argument("--hex", help="Hex direto (ex: '41 42 43' ou '\\x41\\x42').")
-    src.add_argument("--hex-in", help="Arquivo texto contendo hex em qualquer formatação.")
+    with open(report_name, "w", encoding="utf-8") as f:
+        f.write(report)
 
-    ap.add_argument("--report", required=True, help="Caminho do relatório de saída (.md recomendado).")
+    print(c(f"\n[+] Relatório gerado: {report_name}", GREEN))
 
-    ap.add_argument("--dump", action="store_true", help="Inclui hexdump no relatório.")
-    ap.add_argument("--width", type=int, default=16, help="Bytes por linha no hexdump (padrão 16).")
-    ap.add_argument("--dump-limit", type=int, default=4096, help="Limite de bytes no hexdump (padrão 4096). Use 0 para completo.")
+    # resumo no terminal
+    ip = layers.get("ipv4", {})
+    tcp = layers.get("tcp", {})
+    if ip:
+        print(c("[Resumo] IP origem/destino:", BLUE), ip.get("src_ip"), "->", ip.get("dst_ip"))
+    if tcp:
+        print(c("[Resumo] TCP portas:", BLUE), tcp.get("src_port"), "->", tcp.get("dst_port"))
+    if "http" in layers:
+        h = layers["http"]
+        print(c("[Resumo] HTTP:", BLUE), h.get("first_line",""))
+    print(c("\nFinalizado ✅", GREEN))
 
-    ap.add_argument("--text", action="store_true", help="Inclui ‘tradução’ para texto (ASCII/UTF-8/Latin1).")
-    ap.add_argument("--text-limit", type=int, default=4096, help="Limite de bytes para as visões de texto (padrão 4096).")
 
-    ap.add_argument("--strings", action="store_true", help="Extrai strings ASCII e inclui no relatório.")
-    ap.add_argument("--min-string", type=int, default=4, help="Tamanho mínimo de string (padrão 4).")
-    ap.add_argument("--strings-limit", type=int, default=200, help="Máximo de strings listadas (padrão 200).")
+# =========================
+# CLI
+# =========================
 
-    ap.add_argument("--out-bin", help="Opcional: salva os bytes em um arquivo .bin (útil se veio de HEX).")
+def parse_args():
+    ap = argparse.ArgumentParser(description="ByteReporter v2 — HEX/BIN -> Ethernet/IP/TCP/HTTP (relatório leigo).")
+    ap.add_argument("--file", help="Arquivo no diretório atual (ex: bytes.txt).")
+    ap.add_argument("--report", default="report.md", help="Nome do relatório (padrão report.md).")
+    ap.add_argument("--force-hex", action="store_true", help="Força interpretar arquivo como HEX-text.")
+    ap.add_argument("--dump-limit", type=int, default=1024, help="Quantos bytes mostrar no hexdump.")
+    return ap.parse_args()
 
-    args = ap.parse_args()
+def main():
+    args = parse_args()
 
-    try:
-        if args.file:
-            with open(args.file, "rb") as f:
-                data = f.read()
-            source_label = f"file:{args.file}"
+    # se não passou --file, entra no modo interativo
+    if not args.file:
+        interactive()
+        return
 
-        elif args.hex is not None:
-            data = hex_to_bytes(args.hex)
-            source_label = "hex:stdin"
+    banner()
 
-        else:
-            with open(args.hex_in, "r", encoding="utf-8", errors="ignore") as f:
-                raw = f.read()
-            data = hex_to_bytes(raw)
-            source_label = f"hexfile:{args.hex_in}"
-
-        if args.out_bin:
-            with open(args.out_bin, "wb") as f:
-                f.write(data)
-            print(colorize(f"[+] bytes exportados: {args.out_bin} ({len(data)} bytes)", GREEN))
-
-        dump_limit = None if args.dump_limit == 0 else args.dump_limit
-
-        report_text = build_report(
-            data=data,
-            source_label=source_label,
-            include_dump=args.dump,
-            dump_width=max(1, args.width),
-            dump_limit=dump_limit,
-            include_strings=args.strings,
-            strings_min=max(1, args.min_string),
-            strings_limit=max(1, args.strings_limit),
-            include_text_views=args.text,
-            text_view_limit=max(1, args.text_limit),
-        )
-
-        # garante pasta
-        os.makedirs(os.path.dirname(os.path.abspath(args.report)) or ".", exist_ok=True)
-        with open(args.report, "w", encoding="utf-8") as f:
-            f.write(report_text)
-
-        print(colorize(f"[+] relatório gerado: {args.report}", GREEN))
-        print(colorize(f"[+] tamanho analisado: {len(data)} bytes", BLUE))
-
-        # resumo rápido no terminal
-        print(colorize("\nResumo rápido:", BOLD))
-        print(f"  - SHA-256: {sha256(data)}")
-        print(f"  - Entropia: {entropy(data):.4f} bits/byte")
-        print(f"  - Tipo provável: {', '.join(guess_filetype(data))}")
-
-    except Exception as e:
-        print(colorize(f"[!] erro: {e}", RED), file=sys.stderr)
+    if os.path.sep in args.file:
+        print(c("[!] Use apenas o nome do arquivo (sem caminho).", RED), file=sys.stderr)
         sys.exit(1)
+    if not os.path.isfile(args.file):
+        print(c(f"[!] Arquivo '{args.file}' não encontrado no diretório atual.", RED), file=sys.stderr)
+        sys.exit(1)
+
+    with open(args.file, "rb") as f:
+        raw = f.read()
+
+    use_hex = args.force_hex or looks_like_hex_text(raw)
+
+    if use_hex:
+        txt = raw.decode("utf-8", errors="ignore")
+        data = hex_text_to_bytes(txt)
+        kind = "hex-text -> bytes (conversão feita)"
+        print(c("[+] Interpretando como HEX-text e convertendo para bytes reais.", GREEN))
+    else:
+        data = raw
+        kind = "binário -> bytes (direto)"
+        print(c("[+] Interpretando como binário (bytes reais).", GREEN))
+
+    layers = analyze_layers(data)
+
+    report = build_report(
+        source_label=f"file:{args.file}",
+        bytes_source_kind=kind,
+        data=data,
+        layers=layers,
+        dump_limit=max(64, args.dump_limit),
+    )
+
+    if not args.report.lower().endswith((".md", ".txt")):
+        args.report += ".md"
+
+    with open(args.report, "w", encoding="utf-8") as f:
+        f.write(report)
+
+    print(c(f"[+] Relatório gerado: {args.report}", GREEN))
 
 
 if __name__ == "__main__":
